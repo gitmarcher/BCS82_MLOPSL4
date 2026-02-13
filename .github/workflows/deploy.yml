@@ -119,7 +119,7 @@ jobs:
       - name: Update best metrics
         if: steps.compare.outputs.should_deploy == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           CURRENT_R2: ${{ needs.train.outputs.r2_score }}
           CURRENT_MSE: ${{ needs.train.outputs.mse }}
         run: |
