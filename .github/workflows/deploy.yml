@@ -1,0 +1,144 @@
+name: Train and Deploy ML Model
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  DOCKER_IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/wine-quality-api
+
+jobs:
+  train:
+    name: Train Model
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Train model
+        run: |
+          python scripts/train.py
+      
+      - name: Extract metrics
+        id: metrics
+        run: |
+          R2_SCORE=$(jq -r '.r2_score' model/metrics.json)
+          MSE=$(jq -r '.mse' model/metrics.json)
+          echo "r2_score=$R2_SCORE" >> $GITHUB_OUTPUT
+          echo "mse=$MSE" >> $GITHUB_OUTPUT
+          echo "Current R2 Score: $R2_SCORE"
+          echo "Current MSE: $MSE"
+      
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifacts
+          path: |
+            model/
+            app/
+            Dockerfile
+            requirements.txt
+          retention-days: 90
+    
+    outputs:
+      r2_score: ${{ steps.metrics.outputs.r2_score }}
+      mse: ${{ steps.metrics.outputs.mse }}
+
+  deploy:
+    name: Deploy Model
+    needs: train
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: model-artifacts
+      
+      - name: Compare metrics and decide deployment
+        id: compare
+        env:
+          CURRENT_R2: ${{ needs.train.outputs.r2_score }}
+          BEST_R2: ${{ vars.BEST_R2_SCORE }}
+          CURRENT_MSE: ${{ needs.train.outputs.mse }}
+          BEST_MSE: ${{ vars.BEST_MSE }}
+        run: |
+          echo "Current R2: $CURRENT_R2"
+          echo "Best R2: $BEST_R2"
+          echo "Current MSE: $CURRENT_MSE"
+          echo "Best MSE: $BEST_MSE"
+          
+          # Use awk for floating point comparison
+          SHOULD_DEPLOY=$(awk -v curr="$CURRENT_R2" -v best="$BEST_R2" \
+            'BEGIN { print (curr > best) ? "true" : "false" }')
+          
+          echo "should_deploy=$SHOULD_DEPLOY" >> $GITHUB_OUTPUT
+          
+          if [ "$SHOULD_DEPLOY" = "false" ]; then
+            echo "::warning::${{ github.actor }} ---- R2 Score did not improve ($CURRENT_R2 <= $BEST_R2)"
+            echo "Deployment skipped."
+          else
+            echo "Metrics improved! Proceeding with deployment."
+          fi
+      
+      - name: Set up Docker Buildx
+        if: steps.compare.outputs.should_deploy == 'true'
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Docker Hub
+        if: steps.compare.outputs.should_deploy == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      
+      - name: Build and push Docker image
+        if: steps.compare.outputs.should_deploy == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.DOCKER_IMAGE_NAME }}:latest
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.DOCKER_IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.DOCKER_IMAGE_NAME }}:buildcache,mode=max
+      
+      - name: Update best metrics
+        if: steps.compare.outputs.should_deploy == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          CURRENT_R2: ${{ needs.train.outputs.r2_score }}
+          CURRENT_MSE: ${{ needs.train.outputs.mse }}
+        run: |
+          # Update BEST_R2_SCORE
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/actions/variables/BEST_R2_SCORE \
+            -f name='BEST_R2_SCORE' \
+            -f value="$CURRENT_R2"
+          
+          # Update BEST_MSE
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/actions/variables/BEST_MSE \
+            -f name='BEST_MSE' \
+            -f value="$CURRENT_MSE"
+          
+          echo "Updated baseline metrics:"
+          echo "  Best R2 Score: $CURRENT_R2"
+          echo "  Best MSE: $CURRENT_MSE"
