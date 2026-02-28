@@ -11,13 +11,13 @@ pipeline {
 
         stage('Pull Image') {
             steps {
-                sh "docker pull --platform=linux/amd64 $IMAGE"
+                sh "docker pull $IMAGE"
             }
         }
 
         stage('Run Container') {
             steps {
-                sh "docker run --platform=linux/amd64 -d -p $PORT:8030 --name $CONTAINER_NAME $IMAGE"
+                sh "docker run -d -p $PORT:8030 --name $CONTAINER_NAME $IMAGE"
             }
         }
 
