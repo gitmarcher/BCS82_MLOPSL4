@@ -47,9 +47,9 @@ pipeline {
 
                     echo "Valid Response: ${response}"
 
-                    if (!response.contains("wine_quality")) {
-                        error("Prediction field missing!")
-                    }
+                    if (!response.contains("predicted_quality")) {
+    error("Prediction field missing!")
+}
                 }
             }
         }
